@@ -1,5 +1,6 @@
 /*
- * This file is part of the ESP32-XBee distribution (https://github.com/nebkat/esp32-xbee).
+ * This file is part of the ESP32 RTKPubcaster distribution.
+ * Based on esp32-xbee (https://github.com/nebkat/esp32-xbee).
  * Copyright (c) 2019 Nebojsa Cvetkovic.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -172,19 +173,19 @@ const config_item_t CONFIG_ITEMS[] = {
         }, {
                 .key = KEY_CONFIG_UART_TX_PIN,
                 .type = CONFIG_ITEM_TYPE_UINT8,
-                .def.uint8 = GPIO_NUM_1
+                .def.uint8 = GPIO_NUM_16
         }, {
                 .key = KEY_CONFIG_UART_RX_PIN,
                 .type = CONFIG_ITEM_TYPE_UINT8,
-                .def.uint8 = GPIO_NUM_3
+                .def.uint8 = GPIO_NUM_17
         }, {
                 .key = KEY_CONFIG_UART_RTS_PIN,
                 .type = CONFIG_ITEM_TYPE_UINT8,
-                .def.uint8 = GPIO_NUM_14
+                .def.uint8 = UART_PIN_NO_CHANGE  // Hardware flow control disabled
         }, {
                 .key = KEY_CONFIG_UART_CTS_PIN,
                 .type = CONFIG_ITEM_TYPE_UINT8,
-                .def.uint8 = GPIO_NUM_33
+                .def.uint8 = UART_PIN_NO_CHANGE  // Hardware flow control disabled
         }, {
                 .key = KEY_CONFIG_UART_BAUD_RATE,
                 .type = CONFIG_ITEM_TYPE_UINT32,

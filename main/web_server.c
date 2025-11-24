@@ -1,5 +1,6 @@
 /*
- * This file is part of the ESP32-XBee distribution (https://github.com/nebkat/esp32-xbee).
+ * This file is part of the ESP32 RTKPubcaster distribution.
+ * Based on esp32-xbee (https://github.com/nebkat/esp32-xbee).
  * Copyright (c) 2019 Nebojsa Cvetkovic.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -31,10 +32,17 @@
 #include <esp_ota_ops.h>
 #include <esp_wifi_ap_get_sta_list.h>
 #include <stream_stats.h>
-#include <esp32/rom/crc.h>
+#include "rom/crc.h"
 #include <lwip/sockets.h>
 #include <esp_timer.h>
 #include "web_server.h"
+#include "gps_parser.h"
+#include "uart.h"
+#include "ota_manager.h"
+#include "ably_client.h"
+#include "ably_rtk.h"
+#include "ably_credentials.h"
+#include "rtcm_config.h"
 
 // Max length a file path can have on storage
 #define FILE_PATH_MAX (ESP_VFS_PATH_MAX + CONFIG_SPIFFS_OBJ_NAME_LEN)
@@ -66,7 +74,7 @@ static esp_err_t www_spiffs_init() {
     esp_vfs_spiffs_conf_t conf = {
             .base_path = WWW_PARTITION_PATH,
             .partition_label = WWW_PARTITION_LABEL,
-            .max_files = 10,
+            .max_files = 20,
             .format_if_mount_failed = false
     };
 
@@ -158,6 +166,24 @@ static esp_err_t json_response(httpd_req_t *req, cJSON *root) {
     if (err != ESP_OK) return err;
 
     return ESP_OK;
+}
+
+static esp_err_t error_response(httpd_req_t *req, int status_code, const char *message) {
+    httpd_resp_set_type(req, "application/json");
+
+    // Map status codes to ESP-IDF error types
+    if (status_code == 400) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, message);
+    } else if (status_code == 500) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, message);
+    } else if (status_code == 501) {
+        httpd_resp_set_status(req, "501 Not Implemented");
+        httpd_resp_send(req, message, strlen(message));
+    } else {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, message);
+    }
+
+    return ESP_FAIL;
 }
 
 static esp_err_t basic_auth(httpd_req_t *req) {
@@ -335,6 +361,8 @@ static esp_err_t file_check_etag_hash(httpd_req_t *req, char *file_hash_path, ch
 }
 
 static esp_err_t file_get_handler(httpd_req_t *req) {
+    ESP_LOGI(TAG, "file_get_handler called for URI: %s", req->uri);
+
     if (check_auth(req) == ESP_FAIL) return ESP_FAIL;
 
     char file_path[FILE_PATH_MAX - strlen(FILE_HASH_SUFFIX)];
@@ -344,6 +372,7 @@ static esp_err_t file_get_handler(httpd_req_t *req) {
 
     // Extract filename from URL
     char *file_name = get_path_from_uri(file_path, WWW_PARTITION_PATH, req->uri, sizeof(file_path));
+    ESP_LOGI(TAG, "file_path: %s, file_name: %s", file_path, file_name ? file_name : "NULL");
     ERROR_ACTION(TAG, file_name == NULL, {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Filename too long");
         return ESP_FAIL;
@@ -732,17 +761,417 @@ static esp_err_t wifi_scan_get_handler(httpd_req_t *req) {
     return json_response(req, root);
 }
 
+static esp_err_t gps_status_get_handler(httpd_req_t *req) {
+    if (check_auth(req) == ESP_FAIL) return ESP_FAIL;
+
+    gps_status_t status;
+    gps_get_status(&status);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "latitude", status.latitude);
+    cJSON_AddNumberToObject(root, "longitude", status.longitude);
+    cJSON_AddNumberToObject(root, "fix_quality", status.fix_quality);
+    cJSON_AddNumberToObject(root, "satellites", status.satellites_used);
+    cJSON_AddNumberToObject(root, "hdop", status.hdop);
+    cJSON_AddNumberToObject(root, "altitude", status.altitude);
+    cJSON_AddStringToObject(root, "timestamp", status.timestamp);
+    cJSON_AddBoolToObject(root, "valid", status.valid);
+    cJSON_AddNumberToObject(root, "last_update_ms", status.last_update_ms);
+
+    return json_response(req, root);
+}
+
+static esp_err_t uart_command_post_handler(httpd_req_t *req) {
+    if (check_auth(req) == ESP_FAIL) return ESP_FAIL;
+
+    int total_len = req->content_len;
+    int cur_len = 0;
+    char *buf = buffer;
+    int received = 0;
+
+    if (total_len >= BUFFER_SIZE) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Content too long");
+        return ESP_FAIL;
+    }
+
+    while (cur_len < total_len) {
+        received = httpd_req_recv(req, buf + cur_len, total_len - cur_len);
+        if (received <= 0) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to receive POST data");
+            return ESP_FAIL;
+        }
+        cur_len += received;
+    }
+    buf[total_len] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    if (root == NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *command_json = cJSON_GetObjectItem(root, "command");
+    if (command_json == NULL || !cJSON_IsString(command_json)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing 'command' field");
+        return ESP_FAIL;
+    }
+
+    const char *command = command_json->valuestring;
+
+    // Add \r\n if not present
+    char cmd_buffer[256];
+    int cmd_len = strlen(command);
+    if (cmd_len > sizeof(cmd_buffer) - 3) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Command too long");
+        return ESP_FAIL;
+    }
+
+    strcpy(cmd_buffer, command);
+    if (cmd_len < 2 || cmd_buffer[cmd_len-2] != '\r' || cmd_buffer[cmd_len-1] != '\n') {
+        strcat(cmd_buffer, "\r\n");
+        cmd_len += 2;
+    }
+
+    // Send command to UART
+    int bytes_sent = uart_write(cmd_buffer, cmd_len);
+
+    cJSON_Delete(root);
+
+    // Return response
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddBoolToObject(response, "success", bytes_sent > 0);
+    cJSON_AddNumberToObject(response, "bytes_sent", bytes_sent);
+    cJSON_AddStringToObject(response, "command", command);
+
+    return json_response(req, response);
+}
+
+// OTA upload handler
+static esp_err_t ota_upload_handler(httpd_req_t *req) {
+    // Authentication check
+    if (check_auth(req) == ESP_FAIL) {
+        return ESP_FAIL;
+    }
+
+    // Validate content length
+    size_t content_len = req->content_len;
+    if (content_len == 0 || content_len > 0x150000) {  // Max 1.3 MB
+        httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE,
+                           "Firmware must be 1-1.3 MB");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "OTA upload started: %u bytes", content_len);
+
+    // Begin OTA
+    ota_context_t ctx;
+    esp_err_t err = ota_begin(content_len, &ctx);
+    if (err != ESP_OK) {
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "success", false);
+        cJSON_AddStringToObject(root, "error", ctx.error_msg);
+        return json_response(req, root);
+    }
+
+    // Stream upload in 4KB chunks
+    char *buf = malloc(4096);
+    if (buf == NULL) {
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "success", false);
+        cJSON_AddStringToObject(root, "error", "Out of memory");
+        return json_response(req, root);
+    }
+
+    int remaining = content_len;
+
+    while (remaining > 0) {
+        int chunk_size = (remaining > 4096) ? 4096 : remaining;
+        int recv_len = httpd_req_recv(req, buf, chunk_size);
+
+        if (recv_len <= 0) {
+            free(buf);
+            if (recv_len == HTTPD_SOCK_ERR_TIMEOUT) {
+                httpd_resp_send_err(req, HTTPD_408_REQ_TIMEOUT, "Upload timeout");
+            } else {
+                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Upload failed");
+            }
+            return ESP_FAIL;
+        }
+
+        err = ota_write(buf, recv_len, &ctx);
+        if (err != ESP_OK) {
+            free(buf);
+            cJSON *root = cJSON_CreateObject();
+            cJSON_AddBoolToObject(root, "success", false);
+            cJSON_AddStringToObject(root, "error", ctx.error_msg);
+            return json_response(req, root);
+        }
+
+        remaining -= recv_len;
+    }
+
+    free(buf);
+
+    // Finalize and activate (SIGNATURE VERIFICATION HAPPENS HERE)
+    err = ota_end_and_activate(&ctx);
+    if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "success", false);
+        cJSON_AddStringToObject(root, "error", "Invalid firmware signature");
+        return json_response(req, root);
+    } else if (err != ESP_OK) {
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "success", false);
+        cJSON_AddStringToObject(root, "error", ctx.error_msg);
+        return json_response(req, root);
+    }
+
+    // Send success response
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "success", true);
+    cJSON_AddStringToObject(root, "message", "OTA complete, restarting in 2 seconds");
+    esp_err_t result = json_response(req, root);
+
+    // Schedule restart
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    esp_restart();
+
+    return result;
+}
+
+// Ably status handler
+static esp_err_t ably_status_handler(httpd_req_t *req) {
+    if (check_auth(req) == ESP_FAIL) {
+        return ESP_FAIL;
+    }
+
+    // Get Ably client state
+    ably_client_state_t state = ably_client_get_state();
+    const char *state_str;
+    switch (state) {
+        case ABLY_STATE_DISCONNECTED: state_str = "disconnected"; break;
+        case ABLY_STATE_CONNECTING: state_str = "connecting"; break;
+        case ABLY_STATE_CONNECTED: state_str = "connected"; break;
+        case ABLY_STATE_ERROR: state_str = "error"; break;
+        default: state_str = "unknown"; break;
+    }
+
+    // Get RTK statistics
+    ably_rtk_stats_t stats;
+    ably_rtk_get_stats(&stats);
+
+    // Get current batch info
+    uint8_t batch_count = ably_rtk_batch_get_count();
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "state", state_str);
+    cJSON_AddBoolToObject(root, "connected", ably_client_is_connected());
+    cJSON_AddStringToObject(root, "channel", ABLY_CHANNEL_NAME);
+
+    cJSON *statistics = cJSON_CreateObject();
+    cJSON_AddNumberToObject(statistics, "messages_sent", (double)stats.messages_sent);
+    cJSON_AddNumberToObject(statistics, "bytes_sent", (double)stats.bytes_sent);
+    cJSON_AddNumberToObject(statistics, "avg_latency_ms", stats.avg_latency_ms);
+    cJSON_AddNumberToObject(statistics, "current_batch_count", batch_count);
+    cJSON_AddItemToObject(root, "stats", statistics);
+
+    // Add subscriber/client information
+    cJSON *subscriber_info = cJSON_CreateObject();
+    bool ready_for_subscribers = ably_client_is_connected();
+
+    // Update subscriber count from Ably API (will update internal state)
+    uint32_t subscriber_count = 0;
+    esp_err_t err = ably_client_check_occupancy(&subscriber_count);
+    if (err != ESP_OK) {
+        // Fallback to cached count if API call fails
+        subscriber_count = ably_client_get_subscriber_count();
+        ESP_LOGD(TAG, "Occupancy check failed, using cached count: %lu", subscriber_count);
+    }
+    cJSON_AddBoolToObject(subscriber_info, "ready_for_clients", ready_for_subscribers);
+    cJSON_AddNumberToObject(subscriber_info, "subscriber_count", subscriber_count);
+    cJSON_AddBoolToObject(subscriber_info, "receiving_gps_data", batch_count > 0);
+    cJSON_AddBoolToObject(subscriber_info, "actively_publishing", stats.messages_sent > 0);
+
+    // Add helpful notes
+    // Note: subscriber_count includes ESP32 itself, so >1 means external clients
+    if (!ready_for_subscribers) {
+        cJSON_AddStringToObject(subscriber_info, "note", "Not connected to Ably - clients cannot subscribe yet");
+    } else if (subscriber_count <= 1 && batch_count > 0) {
+        cJSON_AddStringToObject(subscriber_info, "note", "GPS data available but no external subscribers - waiting for clients before publishing to save bandwidth");
+    } else if (batch_count == 0 && stats.messages_sent == 0) {
+        cJSON_AddStringToObject(subscriber_info, "note", "Ready for clients but no GPS data received yet. Check if UM980 GPS is connected and configured as RTK base station.");
+    } else if (stats.messages_sent > 0 && subscriber_count > 1) {
+        cJSON_AddStringToObject(subscriber_info, "note", "Publishing RTK corrections to active subscribers");
+    } else {
+        cJSON_AddStringToObject(subscriber_info, "note", "Ready to publish - waiting for RTCM3 data from GPS");
+    }
+    cJSON_AddStringToObject(subscriber_info, "dashboard_url", "https://ably.com/dashboard");
+    cJSON_AddItemToObject(root, "clients", subscriber_info);
+
+    return json_response(req, root);
+}
+
+// OTA info handler
+static esp_err_t ota_info_handler(httpd_req_t *req) {
+    if (check_auth(req) == ESP_FAIL) {
+        return ESP_FAIL;
+    }
+
+    char version[32], sha256[65];
+    ota_get_version_info(version, sizeof(version), sha256, sizeof(sha256));
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "version", version);
+    cJSON_AddStringToObject(root, "sha256", sha256);
+    cJSON_AddStringToObject(root, "running_partition", running->label);
+    cJSON_AddStringToObject(root, "next_partition", next ? next->label : "unknown");
+    cJSON_AddNumberToObject(root, "partition_size", running->size);
+    cJSON_AddNumberToObject(root, "max_firmware_size", 0x150000);
+    cJSON_AddBoolToObject(root, "secure_boot_enabled", true);
+    cJSON_AddBoolToObject(root, "ota_in_progress", ota_is_in_progress());
+
+    return json_response(req, root);
+}
+
+// RTCM config GET handler
+static esp_err_t rtcm_config_get_handler(httpd_req_t *req) {
+    if (check_auth(req) == ESP_FAIL) {
+        return ESP_FAIL;
+    }
+
+    rtcm_config_t config;
+    esp_err_t err = rtcm_config_get(&config);
+    if (err != ESP_OK) {
+        return error_response(req, 500, "Failed to get RTCM config");
+    }
+
+    char *json_str = malloc(4096);
+    if (!json_str) {
+        return error_response(req, 500, "Out of memory");
+    }
+
+    err = rtcm_config_serialize_json(&config, json_str, 4096);
+    if (err != ESP_OK) {
+        free(json_str);
+        return error_response(req, 500, "Failed to serialize config");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json_str);
+    free(json_str);
+    return ESP_OK;
+}
+
+// RTCM config POST handler
+static esp_err_t rtcm_config_post_handler(httpd_req_t *req) {
+    if (check_auth(req) == ESP_FAIL) {
+        return ESP_FAIL;
+    }
+
+    char *buf = malloc(4096);
+    if (!buf) {
+        return error_response(req, 500, "Out of memory");
+    }
+
+    int ret = httpd_req_recv(req, buf, 4096);
+    if (ret <= 0) {
+        free(buf);
+        return error_response(req, 400, "Failed to receive data");
+    }
+    buf[ret] = '\0';
+
+    rtcm_config_t config;
+    esp_err_t err = rtcm_config_deserialize_json(buf, &config);
+    free(buf);
+
+    if (err != ESP_OK) {
+        return error_response(req, 400, "Invalid configuration");
+    }
+
+    err = rtcm_config_set(&config);
+    if (err != ESP_OK) {
+        return error_response(req, 500, "Failed to save configuration");
+    }
+
+    err = rtcm_config_apply(&config);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Config saved but failed to apply to GPS: %s", esp_err_to_name(err));
+    }
+
+    // Update RTK batching expectations
+    err = ably_rtk_set_expected_messages(&config);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to update RTK batching: %s", esp_err_to_name(err));
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"success\":true,\"message\":\"Configuration saved and applied\"}");
+    return ESP_OK;
+}
+
+// RTCM config detect handler (GPS query)
+static esp_err_t rtcm_config_detect_handler(httpd_req_t *req) {
+    if (check_auth(req) == ESP_FAIL) {
+        return ESP_FAIL;
+    }
+
+    rtcm_config_t config;
+    esp_err_t err = uart_query_rtcm_config(&config, 5000);
+
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        return error_response(req, 501, "GPS auto-detection not yet implemented");
+    } else if (err != ESP_OK) {
+        return error_response(req, 500, "Failed to query GPS");
+    }
+
+    char *json_str = malloc(4096);
+    if (!json_str) {
+        return error_response(req, 500, "Out of memory");
+    }
+
+    err = rtcm_config_serialize_json(&config, json_str, 4096);
+    if (err != ESP_OK) {
+        free(json_str);
+        return error_response(req, 500, "Failed to serialize config");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json_str);
+    free(json_str);
+    return ESP_OK;
+}
+
+// Static storage for URI handlers - must persist for server lifetime
+static httpd_uri_t uri_handlers[24];
+static int uri_handler_count = 0;
+
 static esp_err_t register_uri_handler(httpd_handle_t server, const char *path, httpd_method_t method, esp_err_t (*handler)(httpd_req_t *r)) {
-    httpd_uri_t uri_config_get = {
-            .uri        = path,
-            .method     = method,
-            .handler    = handler
-    };
-    return httpd_register_uri_handler(server, &uri_config_get);
+    if (uri_handler_count >= sizeof(uri_handlers) / sizeof(uri_handlers[0])) {
+        ESP_LOGE(TAG, "Too many URI handlers registered");
+        return ESP_ERR_NO_MEM;
+    }
+
+    httpd_uri_t *uri_config = &uri_handlers[uri_handler_count++];
+    uri_config->uri = path;
+    uri_config->method = method;
+    uri_config->handler = handler;
+    uri_config->user_ctx = NULL;
+
+    esp_err_t ret = httpd_register_uri_handler(server, uri_config);
+    ESP_LOGI(TAG, "Registered URI handler: %s (method %d) - result: %d", path, method, ret);
+    return ret;
 }
 
 static httpd_handle_t web_server_start(void)
 {
+    // Reset URI handler counter for clean restart
+    uri_handler_count = 0;
+
     config_get_primitive(CONF_ITEM(KEY_CONFIG_ADMIN_AUTH), &auth_method);
     if (auth_method == AUTH_METHOD_BASIC) {
         char *username, *password;
@@ -756,6 +1185,7 @@ static httpd_handle_t web_server_start(void)
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
+    config.max_uri_handlers = 24;  // Increased to accommodate OTA + Ably + RTCM handlers
 
     // Start the httpd server
     ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
@@ -764,12 +1194,26 @@ static httpd_handle_t web_server_start(void)
         register_uri_handler(server, "/config", HTTP_POST, config_post_handler);
         register_uri_handler(server, "/status", HTTP_GET, status_get_handler);
 
+        register_uri_handler(server, "/gps/status", HTTP_GET, gps_status_get_handler);
+        register_uri_handler(server, "/uart/command", HTTP_POST, uart_command_post_handler);
+
+        register_uri_handler(server, "/api/ota/upload", HTTP_POST, ota_upload_handler);
+        register_uri_handler(server, "/api/ota/info", HTTP_GET, ota_info_handler);
+
+        register_uri_handler(server, "/api/ably/status", HTTP_GET, ably_status_handler);
+
+        register_uri_handler(server, "/api/rtcm/config", HTTP_GET, rtcm_config_get_handler);
+        register_uri_handler(server, "/api/rtcm/config", HTTP_POST, rtcm_config_post_handler);
+        register_uri_handler(server, "/api/rtcm/detect", HTTP_GET, rtcm_config_detect_handler);
+
         register_uri_handler(server, "/log", HTTP_GET, log_get_handler);
         register_uri_handler(server, "/core_dump", HTTP_GET, core_dump_get_handler);
         register_uri_handler(server, "/heap_info", HTTP_GET, heap_info_get_handler);
 
         register_uri_handler(server, "/wifi/scan", HTTP_GET, wifi_scan_get_handler);
 
+        register_uri_handler(server, "/", HTTP_GET, file_get_handler);
+        register_uri_handler(server, "/index.html", HTTP_GET, file_get_handler);
         register_uri_handler(server, "/*", HTTP_GET, file_get_handler);
     }
 

@@ -1,5 +1,6 @@
 /*
- * This file is part of the ESP32-XBee distribution (https://github.com/nebkat/esp32-xbee).
+ * This file is part of the ESP32 RTKPubcaster distribution.
+ * Based on esp32-xbee (https://github.com/nebkat/esp32-xbee).
  * Copyright (c) 2019 Nebojsa Cvetkovic.
  *
  * This program is free software: you can redistribute it and/or modify

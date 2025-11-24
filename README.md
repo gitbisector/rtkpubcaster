@@ -1,37 +1,51 @@
-# ESP32 NTRIP Duo
-This is modified version of ESP32 xbee.
+# ESP32 RTKPubcaster
 
-Main difference is that this have two NTRIP servers that can be running at the same time to be able to feed Onocoy and RTK Direct!!!
+ESP32 firmware for streaming RTCM3 corrections from a UM980 GPS receiver to mobile clients via Ably MQTT.
 
-ESP32 NTRIP Duo is made with [ESP-IDF](https://github.com/espressif/esp-idf). Its main function is to forward the UART of the ESP32 to a variety of protocols over WiFi.
+Forked from [esp32-ntrip-DUO](https://github.com/incarvr6/esp32-ntrip-DUO), redesigned for RTK base station operation with real-time correction streaming.
 
-In this version Installation is simplified, with just a single bin file. You can use ESPHome web flasher https://web.esphome.io/ just connect your ESP32 dev board to PC, select connect, cho0se correct COM port, connect and install. On popup choose bin file and click install.
+## Hardware
 
-This software can run on ESP32 WROOM type. Now added ESP32S3, ESP32C3, ESP32S2  Just choose correct bin file!
-For ESP32S2 if ESPHome is not connecting (it didn't with S2mini) You can use https://tasmota.github.io/install/ to install with single bin file.
+- **ESP32-C6** (primary target)
+- **UM980 GPS receiver** (dual-mode RTK capable, 50Hz update rate)
+- UART communication (default: TX gpio1, RX gpio3)
+
 ## Features
-- WiFi Station
-- WiFi Hotspot
-- Web Interface
-- UART configuration
-- Two NTRIP Servers
 
+- RTCM3 message batching and streaming
+- Ably MQTT integration with real-time occupancy tracking
+- Conditional publishing (only when subscribers present)
+- Web-based configuration interface
+- OTA firmware updates with signature verification and rollback
+- Configurable RTCM message rates (0.02s to 60s)
+- GPS status monitoring and NMEA parsing
 
-## Help
-Now It can be compiled using ESP-IDF 5.4. (with some depreciation comments)
+## Build
 
-To install the latest firmware use ESPHome web Flasher https://web.esphome.io/
+Requires ESP-IDF 5.5+:
 
-Here is installation video https://youtu.be/33Mu5EV7fOE?si=J6kwCt6bbmIu7HnS
+```bash
+idf.py build
+idf.py -p /dev/ttyUSB0 flash monitor
+```
 
-It is still work in progress!!!
+## Configuration
 
-## Pinout
-By default it is set for UART0 TX gpio1, RX gpio3 including ESP32S3
+1. Copy `main/ably_credentials.h.example` to `main/ably_credentials.h`
+2. Add your Ably API keys and channel name
+3. Configure via web interface at `http://192.168.4.1` (AP mode) or device IP
 
-LED with common positive and low output:
+## Architecture
 
-ESP32: gpio21 Red, gpio22 Green, gpio23 Blue
+```
+UM980 GPS → UART → ESP32 → Ably MQTT → Mobile Clients
+  (RTCM3)           (Batch)   (TLS)     (Subscribe)
+```
 
-ESP32S3: gpio4 Red, gpio5 Green, gpio6 Blue
-![IMG_20250212_000825](https://github.com/user-attachments/assets/f17d28dc-4bc7-4647-8311-7a1c44526d17)
+See `ABLY_SETUP.md` for Ably channel configuration details.
+
+## License
+
+GPLv3 - See LICENSE file.
+
+Originally derived from [esp32-xbee](https://github.com/nebkat/esp32-xbee) by Nebojsa Cvetkovic, forked as [esp32-ntrip-DUO](https://github.com/incarvr6/esp32-ntrip-DUO), and redesigned as RTKPubcaster for Ably-based RTK correction streaming.

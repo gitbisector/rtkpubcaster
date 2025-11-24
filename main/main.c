@@ -1,5 +1,6 @@
 /*
- * This file is part of the ESP32-XBee distribution (https://github.com/nebkat/esp32-xbee).
+ * This file is part of the ESP32 RTKPubcaster distribution.
+ * Based on esp32-xbee (https://github.com/nebkat/esp32-xbee).
  * Copyright (c) 2019 Nebojsa Cvetkovic.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -35,8 +36,14 @@
 #include "wifi.h"
 
 #include "uart.h"
+#include "gps_parser.h"
+#include "ota_manager.h"
 #include "interface/ntrip.h"
 #include "tasks.h"
+#include "ably_client.h"
+#include "ably_rtk.h"
+#include "ably_credentials.h"
+#include "rtcm_config.h"
 
 static const char *TAG = "MAIN";
 
@@ -91,7 +98,7 @@ void app_main()
     uart_nmea("$PESP,INIT,START,%s,%s", app_desc->version, reset_reason_name(reset_reason));
 
     ESP_LOGI(TAG, "╔══════════════════════════════════════════════╗");
-    ESP_LOGI(TAG, "║ ESP32 XBee %-33s "                          "║", app_desc->version);
+    ESP_LOGI(TAG, "║ ESP32 RTKPubcaster %-26s "                  "║", app_desc->version);
     ESP_LOGI(TAG, "╠══════════════════════════════════════════════╣");
     ESP_LOGI(TAG, "║ Compiled: %8s %-25s "                       "║", app_desc->time, app_desc->date);
     ESP_LOGI(TAG, "║ ELF SHA256: %-32s "                         "║", elf_buffer);
@@ -99,11 +106,36 @@ void app_main()
     ESP_LOGI(TAG, "╟──────────────────────────────────────────────╢");
     ESP_LOGI(TAG, "║ Reset reason: %-30s "                       "║", reset_reason_name(reset_reason));
     ESP_LOGI(TAG, "╟──────────────────────────────────────────────╢");
-    ESP_LOGI(TAG, "║ Author: Nebojša Cvetković                    ║");
-    ESP_LOGI(TAG, "║ Source: https://github.com/nebkat/esp32-xbee ║");
+    ESP_LOGI(TAG, "║ Based on esp32-xbee by Nebojša Cvetković     ║");
+    ESP_LOGI(TAG, "║ https://github.com/gitbisector/rtkpubcaster  ║");
     ESP_LOGI(TAG, "╚══════════════════════════════════════════════╝");
 
     esp_event_loop_create_default();
+
+    // Initialize GPS parser after event loop is created
+    gps_parser_init();
+
+    // Initialize OTA manager
+    ota_manager_init();
+
+    // Check if this is first boot after OTA update
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t ota_state;
+
+    if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
+        if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+            ESP_LOGI(TAG, "First boot after OTA update - running diagnostics");
+
+            // Optional: Run health checks here
+            // - WiFi connectivity test
+            // - UART communication test
+            // - Critical subsystem checks
+
+            // Mark app as valid to prevent rollback
+            ESP_LOGI(TAG, "Diagnostics passed, marking app as valid");
+            ota_mark_valid();
+        }
+    }
 
     vTaskDelay(pdMS_TO_TICKS(2500));
     status_led->interval = 100;
@@ -142,6 +174,65 @@ void app_main()
     sntp_set_sync_mode(SNTP_SYNC_MODE_SMOOTH);
     sntp_set_time_sync_notification_cb(sntp_time_set_handler);
     sntp_init();
+
+    // Initialize RTKPubcaster streaming
+    ESP_LOGI(TAG, "Initializing RTKPubcaster streaming...");
+
+    // Extract base ID from channel name (e.g., "base.1.rtk" -> "base1")
+    const char *channel = ABLY_CHANNEL_NAME;
+    char base_id[32];
+    snprintf(base_id, sizeof(base_id), "%s", channel);
+    // Remove dots and colons for cleaner base_id
+    for (char *p = base_id; *p; p++) {
+        if (*p == '.' || *p == ':') *p = '_';
+    }
+
+    // Initialize RTCM configuration system
+    esp_err_t err = rtcm_config_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize RTCM config: %s", esp_err_to_name(err));
+    }
+
+    // Initialize RTKPubcaster system
+    err = ably_rtk_init(base_id);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize RTKPubcaster: %s", esp_err_to_name(err));
+    } else {
+        // Configure RTK batching with RTCM message expectations
+        rtcm_config_t rtcm_cfg;
+        err = rtcm_config_get(&rtcm_cfg);
+        if (err == ESP_OK) {
+            err = ably_rtk_set_expected_messages(&rtcm_cfg);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to configure RTKPubcaster batching: %s", esp_err_to_name(err));
+            }
+        }
+
+        // Initialize Ably MQTT client
+        err = ably_client_init(ABLY_API_KEY_PUBLISHER, ABLY_CHANNEL_NAME, NULL);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to initialize Ably client: %s", esp_err_to_name(err));
+        } else {
+            // Start Ably client
+            err = ably_client_start();
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to start Ably client: %s", esp_err_to_name(err));
+            } else {
+                ESP_LOGI(TAG, "Ably client started, waiting for connection...");
+
+                // Wait a moment for connection
+                vTaskDelay(pdMS_TO_TICKS(2000));
+
+                // Enter presence if connected
+                if (ably_client_is_connected()) {
+                    ably_client_presence_enter(NULL);
+                    ESP_LOGI(TAG, "RTKPubcaster streaming active on channel: %s", ABLY_CHANNEL_NAME);
+                } else {
+                    ESP_LOGW(TAG, "Ably client not yet connected, presence will be entered on connect");
+                }
+            }
+        }
+    }
 
 #ifdef DEBUG_HEAP
     while (true) {

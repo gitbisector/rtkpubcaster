@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ESP32 NTRIP - Firmware Update</title>
+    <script src="jquery-3.4.1.min.js"></script>
+    <script src="bs-4.3.1.bundle.min.js"></script>
+    <link rel="stylesheet" href="bs-4.3.1.min.css">
+    <link rel="shortcut icon" href="/favicon.ico" type="image/x-icon">
+    <style>
+        .upload-area {
+            border: 2px dashed #007bff;
+            border-radius: 8px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: #f8f9fa;
+        }
+
+        .upload-area:hover {
+            border-color: #0056b3;
+            background: #e7f3ff;
+        }
+
+        .upload-area.drag-over {
+            border-color: #28a745;
+            background: #d4edda;
+        }
+
+        #uploadProgress {
+            display: none;
+            margin-top: 20px;
+        }
+
+        .progress-info {
+            margin-top: 10px;
+            font-size: 0.875rem;
+            color: #6c757d;
+        }
+
+        .firmware-info {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            border-bottom: 1px solid #dee2e6;
+        }
+
+        .info-label {
+            font-weight: 600;
+            color: #495057;
+        }
+
+        .info-value {
+            color: #6c757d;
+            font-family: monospace;
+            word-break: break-all;
+        }
+
+        .file-input-wrapper {
+            position: relative;
+            overflow: hidden;
+            display: inline-block;
+        }
+
+        .file-input-wrapper input[type=file] {
+            position: absolute;
+            left: -9999px;
+        }
+
+        #updateButton {
+            display: none;
+        }
+
+        .status-message {
+            display: none;
+            margin-top: 15px;
+            padding: 15px;
+            border-radius: 5px;
+        }
+
+        .status-message.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .status-message.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .status-message.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+
+        nav.navbar {
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container">
+            <a class="navbar-brand" href="/">ESP32 NTRIP</a>
+            <div class="navbar-nav">
+                <a class="nav-item nav-link" href="/">GPS Dashboard</a>
+                <a class="nav-item nav-link" href="/config.html">Configuration</a>
+                <a class="nav-item nav-link" href="/ably.html">Ably Status</a>
+                <a class="nav-item nav-link" href="/rtcm.html">RTCM Config</a>
+                <a class="nav-item nav-link active" href="/ota.html">Firmware Update</a>
+                <a class="nav-item nav-link" href="/log.html">Logs</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container">
+        <div class="pt-3">
+            <h2>Firmware Update</h2>
+            <p class="lead">Upload signed firmware to update your ESP32 device securely</p>
+        </div>
+
+        <!-- Current Firmware Info -->
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5 class="mb-0">Current Firmware</h5>
+            </div>
+            <div class="card-body">
+                <div class="firmware-info">
+                    <div class="info-row">
+                        <span class="info-label">Version:</span>
+                        <span class="info-value" id="currentVersion">Loading...</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">SHA256:</span>
+                        <span class="info-value" id="currentSha256">Loading...</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Running Partition:</span>
+                        <span class="info-value" id="runningPartition">Loading...</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Next OTA Partition:</span>
+                        <span class="info-value" id="nextPartition">Loading...</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Secure Boot:</span>
+                        <span class="info-value" id="secureBootStatus">Loading...</span>
+                    </div>
+                    <div class="info-row" style="border-bottom: none;">
+                        <span class="info-label">Max Firmware Size:</span>
+                        <span class="info-value">1.3 MB (1,310,720 bytes)</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Upload Area -->
+        <div class="card mb-4">
+            <div class="card-header bg-success text-white">
+                <h5 class="mb-0">Upload Firmware</h5>
+            </div>
+            <div class="card-body">
+                <div class="upload-area" id="uploadArea" onclick="document.getElementById('fileInput').click()">
+                    <div class="file-input-wrapper">
+                        <input type="file" id="fileInput" accept=".bin" />
+                    </div>
+                    <h6 class="mb-2">Click to select or drag & drop firmware file here</h6>
+                    <p class="text-muted mb-0">
+                        Expected file format: <strong>.bin</strong> (signed firmware binary)<br>
+                        Maximum size: 1.3 MB
+                    </p>
+                </div>
+
+                <div id="fileInfo" style="display: none; margin-top: 15px;">
+                    <div class="alert alert-info">
+                        <strong>Selected File:</strong> <span id="fileName"></span>
+                        (<span id="fileSize"></span> bytes)
+                    </div>
+                    <button type="button" class="btn btn-warning" onclick="clearFile()">
+                        Clear Selection
+                    </button>
+                    <button type="button" class="btn btn-success" id="updateButton" onclick="startUpdate()">
+                        Start Update
+                    </button>
+                </div>
+
+                <div id="uploadProgress">
+                    <div class="progress" style="height: 25px;">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated"
+                             id="progressBar" role="progressbar" style="width: 0%">
+                            <span id="progressText">0%</span>
+                        </div>
+                    </div>
+                    <div class="progress-info">
+                        <span id="bytesInfo">0 / 0 bytes</span>
+                    </div>
+                </div>
+
+                <div id="statusMessage" class="status-message"></div>
+            </div>
+        </div>
+
+        <!-- Safety Information -->
+        <div class="card mb-4">
+            <div class="card-header bg-warning text-dark">
+                <h5 class="mb-0">Important Safety Information</h5>
+            </div>
+            <div class="card-body">
+                <div class="alert alert-warning" role="alert">
+                    <h6 class="alert-heading">Before Updating</h6>
+                    <ul class="mb-0">
+                        <li>Ensure device is connected to stable power and WiFi</li>
+                        <li>Do not disconnect or reset device during update</li>
+                        <li>Update process takes approximately 30-60 seconds</li>
+                        <li>Device will automatically restart after successful update</li>
+                        <li>Firmware must be signed with correct RSA key</li>
+                        <li>If update fails, device will rollback to previous firmware</li>
+                    </ul>
+                </div>
+
+                <div class="alert alert-info" role="alert">
+                    <h6 class="alert-heading">Security Features</h6>
+                    <ul class="mb-0">
+                        <li><strong>Secure Boot V2:</strong> Only signed firmware accepted</li>
+                        <li><strong>Signature Verification:</strong> RSA-3072 automatic validation</li>
+                        <li><strong>Anti-Rollback:</strong> Prevents downgrade attacks</li>
+                        <li><strong>Automatic Fallback:</strong> Boots previous firmware on failure</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        let selectedFile = null;
+
+        // Prevent default drag behaviors
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            uploadArea.addEventListener(eventName, preventDefaults, false);
+            document.body.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        // Highlight drop area when item is dragged over it
+        ['dragenter', 'dragover'].forEach(eventName => {
+            uploadArea.addEventListener(eventName, () => {
+                uploadArea.classList.add('drag-over');
+            });
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            uploadArea.addEventListener(eventName, () => {
+                uploadArea.classList.remove('drag-over');
+            });
+        });
+
+        // Handle dropped files
+        uploadArea.addEventListener('drop', (e) => {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            if (files.length > 0) {
+                selectFile(files[0]);
+            }
+        });
+
+        // Handle file input change
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                selectFile(e.target.files[0]);
+            }
+        });
+
+        function selectFile(file) {
+            // Validate file extension
+            if (!file.name.match(/\.bin$/i)) {
+                showStatus('Invalid file type. Expected .bin file.', 'error');
+                return;
+            }
+
+            // Validate file size
+            if (file.size > 0x150000) {  // 1.3 MB
+                showStatus('File too large. Maximum size is 1.3 MB (1,310,720 bytes).', 'error');
+                return;
+            }
+
+            if (file.size < 100000) {  // 100 KB minimum
+                showStatus('File too small. Minimum size is 100 KB.', 'error');
+                return;
+            }
+
+            selectedFile = file;
+            document.getElementById('fileName').textContent = file.name;
+            document.getElementById('fileSize').textContent = file.size.toLocaleString();
+            document.getElementById('fileInfo').style.display = 'block';
+            document.getElementById('updateButton').style.display = 'inline-block';
+            document.getElementById('statusMessage').style.display = 'none';
+        }
+
+        function clearFile() {
+            selectedFile = null;
+            fileInput.value = '';
+            document.getElementById('fileInfo').style.display = 'none';
+            document.getElementById('updateButton').style.display = 'none';
+            document.getElementById('uploadProgress').style.display = 'none';
+            document.getElementById('statusMessage').style.display = 'none';
+        }
+
+        function startUpdate() {
+            if (!selectedFile) {
+                showStatus('No file selected.', 'error');
+                return;
+            }
+
+            if (!confirm('Are you sure you want to update the firmware? The device will restart.')) {
+                return;
+            }
+
+            document.getElementById('updateButton').disabled = true;
+            document.getElementById('fileInput').disabled = true;
+            document.getElementById('uploadProgress').style.display = 'block';
+
+            showStatus('Uploading firmware...', 'info');
+
+            fetch('/api/ota/upload', {
+                method: 'POST',
+                body: selectedFile,
+                headers: {
+                    'Content-Type': 'application/octet-stream'
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showStatus(data.message || 'Update successful! Device restarting...', 'success');
+                    document.getElementById('progressBar').style.width = '100%';
+                    document.getElementById('progressText').textContent = '100%';
+
+                    // Reload page after device restarts (wait 10 seconds)
+                    setTimeout(() => {
+                        showStatus('Waiting for device to restart...', 'info');
+                        setTimeout(() => location.reload(), 5000);
+                    }, 5000);
+                } else {
+                    showStatus('Update failed: ' + (data.error || 'Unknown error'), 'error');
+                    document.getElementById('updateButton').disabled = false;
+                    document.getElementById('fileInput').disabled = false;
+                }
+            })
+            .catch(error => {
+                showStatus('Upload failed: ' + error.message, 'error');
+                document.getElementById('updateButton').disabled = false;
+                document.getElementById('fileInput').disabled = false;
+            });
+        }
+
+        function showStatus(message, type) {
+            const statusDiv = document.getElementById('statusMessage');
+            statusDiv.textContent = message;
+            statusDiv.className = 'status-message ' + type;
+            statusDiv.style.display = 'block';
+        }
+
+        function updateFirmwareInfo() {
+            fetch('/api/ota/info')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('currentVersion').textContent = data.version || 'Unknown';
+                    document.getElementById('currentSha256').textContent =
+                        (data.sha256 ? data.sha256.substring(0, 16) + '...' : 'Unknown');
+                    document.getElementById('runningPartition').textContent = data.running_partition || 'Unknown';
+                    document.getElementById('nextPartition').textContent = data.next_partition || 'Unknown';
+                    document.getElementById('secureBootStatus').textContent =
+                        data.secure_boot_enabled ? 'Enabled (RSA-3072)' : 'Disabled';
+                })
+                .catch(error => console.error('Failed to fetch OTA info:', error));
+        }
+
+        // Load firmware info on page load
+        document.addEventListener('DOMContentLoaded', updateFirmwareInfo);
+    </script>
+</body>
+</html>

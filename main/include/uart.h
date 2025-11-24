@@ -2,6 +2,8 @@
 #define ESP32_XBEE_UART_H
 
 #include <esp_event.h>
+#include <esp_err.h>
+#include "rtcm_config.h"
 
 ESP_EVENT_DECLARE_BASE(UART_EVENT_READ);
 ESP_EVENT_DECLARE_BASE(UART_EVENT_WRITE);
@@ -17,5 +19,15 @@ int uart_write(char *buffer, size_t len);
 
 void uart_register_read_handler(esp_event_handler_t event_handler);
 void uart_register_write_handler(esp_event_handler_t event_handler);
+
+/**
+ * Query GPS for current RTCM3 message configuration
+ * Sends LOG command and parses the response
+ *
+ * @param config Pointer to config structure to fill
+ * @param timeout_ms Timeout in milliseconds
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t uart_query_rtcm_config(rtcm_config_t *config, uint32_t timeout_ms);
 
 #endif //ESP32_XBEE_UART_H

@@ -1,7 +1,12 @@
 idf_component_register(SRCS "main.c"
+		"ably_client.c"
+		"ably_rtk.c"
 		"config.c"
 		"core_dump.c"
+		"gps_parser.c"
 		"log.c"
+		"ota_manager.c"
+		"rtcm_config.c"
 		"interface/ntrip_util.c"
 		"retry.c"
 		"status_led.c"
@@ -15,6 +20,7 @@ idf_component_register(SRCS "main.c"
 
 		"protocol/nmea.c"
         INCLUDE_DIRS "include"
-		REQUIRES esp_netif app_update driver esp_wifi nvs_flash espcoredump tcp_transport esp_http_server mbedtls json vfs spiffs lwip button)
+		EMBED_FILES "certs/isrg_root_x1.pem"
+		REQUIRES esp_netif app_update driver esp_wifi nvs_flash espcoredump tcp_transport esp_http_server esp_http_client mqtt mbedtls json vfs spiffs lwip button)
 
 spiffs_create_partition_image(www ../www FLASH_IN_PROJECT)

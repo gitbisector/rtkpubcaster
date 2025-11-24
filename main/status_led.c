@@ -1,5 +1,6 @@
 /*
- * This file is part of the ESP32-XBee distribution (https://github.com/nebkat/esp32-xbee).
+ * This file is part of the ESP32 RTKPubcaster distribution.
+ * Based on esp32-xbee (https://github.com/nebkat/esp32-xbee).
  * Copyright (c) 2019 Nebojsa Cvetkovic.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -21,26 +22,27 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
-#include "freertos/xtensa_api.h"
+// #include "freertos/xtensa_api.h"  // Xtensa-specific, not needed for ESP32-C6 (RISC-V)
 #include "freertos/portmacro.h"
 #include "status_led.h"
 #include <sys/queue.h>
 
-#define LEDC_SPEED_MODE LEDC_HIGH_SPEED_MODE
+#define LEDC_SPEED_MODE LEDC_LOW_SPEED_MODE  // ESP32-C6 only supports low speed mode
 
-#define STATUS_LED_RED_GPIO GPIO_NUM_21
-#define STATUS_LED_GREEN_GPIO GPIO_NUM_22
-#define STATUS_LED_BLUE_GPIO GPIO_NUM_23
+#define STATUS_LED_RED_GPIO GPIO_NUM_18
+#define STATUS_LED_GREEN_GPIO GPIO_NUM_19
+#define STATUS_LED_BLUE_GPIO GPIO_NUM_20
 #define STATUS_LED_RED_CHANNEL LEDC_CHANNEL_0
 #define STATUS_LED_GREEN_CHANNEL LEDC_CHANNEL_1
 #define STATUS_LED_BLUE_CHANNEL LEDC_CHANNEL_2
 
-#define STATUS_LED_RSSI_GPIO GPIO_NUM_18
-#define STATUS_LED_SLEEP_GPIO GPIO_NUM_27
-#define STATUS_LED_ASSOC_GPIO GPIO_NUM_25
-#define STATUS_LED_RSSI_CHANNEL LEDC_CHANNEL_3
-#define STATUS_LED_SLEEP_CHANNEL LEDC_CHANNEL_4
-#define STATUS_LED_ASSOC_CHANNEL LEDC_CHANNEL_5
+// Additional status LEDs disabled - no available GPIOs on ESP32-C6 PCB
+// #define STATUS_LED_RSSI_GPIO GPIO_NUM_18
+// #define STATUS_LED_SLEEP_GPIO GPIO_NUM_27
+// #define STATUS_LED_ASSOC_GPIO GPIO_NUM_25
+// #define STATUS_LED_RSSI_CHANNEL LEDC_CHANNEL_3
+// #define STATUS_LED_SLEEP_CHANNEL LEDC_CHANNEL_4
+// #define STATUS_LED_ASSOC_CHANNEL LEDC_CHANNEL_5
 
 #define STATUS_LED_FREQ 1000
 
@@ -190,44 +192,46 @@ void status_led_init() {
     ledc_config.gpio_num = STATUS_LED_BLUE_GPIO;
     ledc_channel_config(&ledc_config);
 
-    ledc_config.channel = STATUS_LED_SLEEP_CHANNEL;
-    ledc_config.gpio_num = STATUS_LED_SLEEP_GPIO;
-    ledc_channel_config(&ledc_config);
+    // Disabled - no available GPIOs for additional status LEDs
+    // ledc_config.channel = STATUS_LED_SLEEP_CHANNEL;
+    // ledc_config.gpio_num = STATUS_LED_SLEEP_GPIO;
+    // ledc_channel_config(&ledc_config);
 
-    ledc_config.duty = 0;
-    ledc_config.channel = STATUS_LED_RSSI_CHANNEL;
-    ledc_config.gpio_num = STATUS_LED_RSSI_GPIO;
-    ledc_channel_config(&ledc_config);
+    // ledc_config.duty = 0;
+    // ledc_config.channel = STATUS_LED_RSSI_CHANNEL;
+    // ledc_config.gpio_num = STATUS_LED_RSSI_GPIO;
+    // ledc_channel_config(&ledc_config);
 
-    ledc_config.channel = STATUS_LED_ASSOC_CHANNEL;
-    ledc_config.gpio_num = STATUS_LED_ASSOC_GPIO;
-    ledc_channel_config(&ledc_config);
+    // ledc_config.channel = STATUS_LED_ASSOC_CHANNEL;
+    // ledc_config.gpio_num = STATUS_LED_ASSOC_GPIO;
+    // ledc_channel_config(&ledc_config);
 
     ledc_fade_func_install(0);
 
     xTaskCreate(status_led_task, "status_led", 2048, NULL, TASK_PRIORITY_STATUS_LED, &led_task);
 }
 
+// Disabled - no available GPIOs for additional status LEDs
 void rssi_led_set(uint8_t value) {
-    status_led_channel_set(STATUS_LED_RSSI_CHANNEL, value);
+    // No-op: RSSI LED disabled
 }
 
 void rssi_led_fade(uint8_t value, int max_fade_time_ms) {
-    status_led_channel_fade(STATUS_LED_RSSI_CHANNEL, value, max_fade_time_ms);
+    // No-op: RSSI LED disabled
 }
 
 void assoc_led_set(uint8_t value) {
-    status_led_channel_set(STATUS_LED_ASSOC_CHANNEL, value);
+    // No-op: Association LED disabled
 }
 
 void assoc_led_fade(uint8_t value, int max_fade_time_ms) {
-    status_led_channel_fade(STATUS_LED_ASSOC_CHANNEL, value, max_fade_time_ms);
+    // No-op: Association LED disabled
 }
 
 void sleep_led_set(uint8_t value) {
-    status_led_channel_set(STATUS_LED_SLEEP_CHANNEL, 0xFF - value);
+    // No-op: Sleep LED disabled
 }
 
 void sleep_led_fade(uint8_t value, int max_fade_time_ms) {
-    status_led_channel_fade(STATUS_LED_SLEEP_CHANNEL, 0xFF - value, max_fade_time_ms);
+    // No-op: Sleep LED disabled
 }

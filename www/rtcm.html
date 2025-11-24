@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 NTRIP - RTCM Configuration</title>
+    <script src="jquery-3.4.1.min.js"></script>
+    <script src="bs-4.3.1.bundle.min.js"></script>
+    <link rel="stylesheet" href="bs-4.3.1.min.css">
+    <link rel="shortcut icon" href="/favicon.ico" type="image/x-icon">
+    <style>
+        nav.navbar {
+            margin-bottom: 20px;
+        }
+        .message-row {
+            border-bottom: 1px solid #dee2e6;
+            padding: 10px 0;
+        }
+        .message-row:last-child {
+            border-bottom: none;
+        }
+        .custom-switch {
+            padding-left: 2.25rem;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container">
+            <a class="navbar-brand" href="/">ESP32 NTRIP</a>
+            <div class="navbar-nav">
+                <a class="nav-item nav-link" href="/">GPS Dashboard</a>
+                <a class="nav-item nav-link" href="/config.html">Configuration</a>
+                <a class="nav-item nav-link active" href="/rtcm.html">RTCM Config</a>
+                <a class="nav-item nav-link" href="/ably.html">Ably Status</a>
+                <a class="nav-item nav-link" href="/ota.html">Firmware Update</a>
+                <a class="nav-item nav-link" href="/log.html">Logs</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container">
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">RTCM Message Configuration</h5>
+                <div>
+                    <button id="detectBtn" class="btn btn-sm btn-light" title="Query GPS for current configuration">
+                        <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
+                        Detect from GPS
+                    </button>
+                    <button id="resetBtn" class="btn btn-sm btn-warning ml-2" title="Reset to default BASE station config">
+                        Reset to Default
+                    </button>
+                </div>
+            </div>
+            <div class="card-body">
+                <div id="statusAlert" class="alert d-none" role="alert"></div>
+
+                <p class="text-muted">
+                    Configure which RTCM3 messages are transmitted by the GPS receiver.
+                    Changes are saved to flash and applied to the GPS immediately.
+                </p>
+
+                <div id="messagesContainer"></div>
+
+                <div class="mt-4">
+                    <button id="addMessageBtn" class="btn btn-sm btn-secondary">
+                        + Add Message
+                    </button>
+                </div>
+            </div>
+            <div class="card-footer">
+                <button id="saveBtn" class="btn btn-success">
+                    <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
+                    Save Configuration
+                </button>
+                <button id="reloadBtn" class="btn btn-secondary ml-2">Reload</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let config = { message_count: 0, messages: [] };
+        const COM_PORTS = ['COM1', 'COM2', 'COM3', 'USB'];
+        const UPDATE_RATES = [
+            { value: 0, label: 'Disabled' },
+            { value: 0.02, label: '50 Hz' },
+            { value: 0.05, label: '20 Hz' },
+            { value: 0.1, label: '10 Hz' },
+            { value: 0.2, label: '5 Hz' },
+            { value: 0.5, label: '2 Hz' },
+            { value: 1, label: '1 Hz' },
+            { value: 2, label: '0.5 Hz (2s)' },
+            { value: 5, label: '0.2 Hz (5s)' },
+            { value: 10, label: '0.1 Hz (10s)' },
+            { value: 30, label: '30 seconds' },
+            { value: 60, label: '1 minute' }
+        ];
+
+        const COMMON_MESSAGES = {
+            1005: 'Station ARP (no height)',
+            1006: 'Station ARP with height',
+            1074: 'GPS MSM4',
+            1077: 'GPS MSM7',
+            1084: 'GLONASS MSM4',
+            1087: 'GLONASS MSM7',
+            1094: 'Galileo MSM4',
+            1097: 'Galileo MSM7',
+            1124: 'BeiDou MSM4',
+            1127: 'BeiDou MSM7',
+            1114: 'QZSS MSM4',
+            1117: 'QZSS MSM7',
+            1230: 'GLONASS Code-Phase Biases'
+        };
+
+        function showStatus(message, type) {
+            $('#statusAlert')
+                .removeClass('d-none alert-success alert-danger alert-warning alert-info')
+                .addClass('alert-' + type)
+                .text(message);
+            setTimeout(() => $('#statusAlert').addClass('d-none'), 5000);
+        }
+
+        function renderMessage(msg, index) {
+            const description = msg.description || COMMON_MESSAGES[msg.message_type] || 'Unknown';
+            return `
+                <div class="message-row" data-index="${index}">
+                    <div class="row align-items-center">
+                        <div class="col-md-1">
+                            <div class="custom-control custom-switch">
+                                <input type="checkbox" class="custom-control-input msg-enabled"
+                                       id="enabled_${index}" ${msg.enabled ? 'checked' : ''}>
+                                <label class="custom-control-label" for="enabled_${index}"></label>
+                            </div>
+                        </div>
+                        <div class="col-md-2">
+                            <input type="number" class="form-control form-control-sm msg-type"
+                                   value="${msg.message_type}" min="1000" max="4095" required>
+                        </div>
+                        <div class="col-md-3">
+                            <input type="text" class="form-control form-control-sm msg-description"
+                                   value="${description}" placeholder="Description">
+                        </div>
+                        <div class="col-md-2">
+                            <select class="form-control form-control-sm msg-port">
+                                ${COM_PORTS.map(port =>
+                                    `<option value="${port}" ${msg.com_port === port ? 'selected' : ''}>${port}</option>`
+                                ).join('')}
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <select class="form-control form-control-sm msg-rate">
+                                ${UPDATE_RATES.map(rate =>
+                                    `<option value="${rate.value}" ${msg.rate === rate.value ? 'selected' : ''}>${rate.label}</option>`
+                                ).join('')}
+                            </select>
+                        </div>
+                        <div class="col-md-1">
+                            <button class="btn btn-sm btn-danger btn-delete" title="Delete message">
+                                ×
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderMessages() {
+            const header = `
+                <div class="message-row">
+                    <div class="row align-items-center font-weight-bold">
+                        <div class="col-md-1">Enable</div>
+                        <div class="col-md-2">Type</div>
+                        <div class="col-md-3">Description</div>
+                        <div class="col-md-2">COM Port</div>
+                        <div class="col-md-3">Update Rate</div>
+                        <div class="col-md-1"></div>
+                    </div>
+                </div>
+            `;
+
+            const messages = config.messages.map((msg, i) => renderMessage(msg, i)).join('');
+            $('#messagesContainer').html(header + messages);
+
+            // Bind delete handlers
+            $('.btn-delete').click(function() {
+                const index = $(this).closest('.message-row').data('index');
+                config.messages.splice(index, 1);
+                config.message_count = config.messages.length;
+                renderMessages();
+            });
+        }
+
+        function collectConfiguration() {
+            config.messages = [];
+            $('.message-row[data-index]').each(function() {
+                const $row = $(this);
+                config.messages.push({
+                    enabled: $row.find('.msg-enabled').is(':checked'),
+                    message_type: parseInt($row.find('.msg-type').val()),
+                    description: $row.find('.msg-description').val(),
+                    com_port: $row.find('.msg-port').val(),
+                    rate: parseInt($row.find('.msg-rate').val())
+                });
+            });
+            config.message_count = config.messages.length;
+            return config;
+        }
+
+        function loadConfiguration() {
+            $.ajax({
+                url: '/api/rtcm/config',
+                method: 'GET',
+                success: function(data) {
+                    config = data;
+                    renderMessages();
+                    showStatus('Configuration loaded', 'success');
+                },
+                error: function() {
+                    showStatus('Failed to load configuration', 'danger');
+                }
+            });
+        }
+
+        function saveConfiguration() {
+            const updatedConfig = collectConfiguration();
+
+            const $btn = $('#saveBtn');
+            const $spinner = $btn.find('.spinner-border');
+            $btn.prop('disabled', true);
+            $spinner.removeClass('d-none');
+
+            $.ajax({
+                url: '/api/rtcm/config',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify(updatedConfig),
+                success: function(response) {
+                    showStatus('Configuration saved and applied to GPS', 'success');
+                    loadConfiguration();
+                },
+                error: function(xhr) {
+                    const msg = xhr.responseJSON?.message || 'Failed to save configuration';
+                    showStatus(msg, 'danger');
+                },
+                complete: function() {
+                    $btn.prop('disabled', false);
+                    $spinner.addClass('d-none');
+                }
+            });
+        }
+
+        function detectFromGPS() {
+            const $btn = $('#detectBtn');
+            const $spinner = $btn.find('.spinner-border');
+            $btn.prop('disabled', true);
+            $spinner.removeClass('d-none');
+
+            $.ajax({
+                url: '/api/rtcm/detect',
+                method: 'GET',
+                success: function(data) {
+                    config = data;
+                    renderMessages();
+                    showStatus('Configuration detected from GPS', 'success');
+                },
+                error: function(xhr) {
+                    if (xhr.status === 501) {
+                        showStatus('GPS auto-detection not yet implemented. Configure manually or use default.', 'warning');
+                    } else {
+                        showStatus('Failed to detect configuration from GPS', 'danger');
+                    }
+                },
+                complete: function() {
+                    $btn.prop('disabled', false);
+                    $spinner.addClass('d-none');
+                }
+            });
+        }
+
+        function resetToDefault() {
+            if (!confirm('Reset to default BASE station configuration?')) return;
+
+            config = {
+                message_count: 5,
+                messages: [
+                    { enabled: true, message_type: 1005, description: 'Station ARP (no height)', com_port: 'COM1', rate: 10 },
+                    { enabled: true, message_type: 1074, description: 'GPS MSM4', com_port: 'COM1', rate: 1 },
+                    { enabled: true, message_type: 1084, description: 'GLONASS MSM4', com_port: 'COM1', rate: 1 },
+                    { enabled: true, message_type: 1094, description: 'Galileo MSM4', com_port: 'COM1', rate: 1 },
+                    { enabled: true, message_type: 1124, description: 'BeiDou MSM4', com_port: 'COM1', rate: 1 }
+                ]
+            };
+            renderMessages();
+            showStatus('Reset to default configuration (not saved)', 'info');
+        }
+
+        function addMessage() {
+            config.messages.push({
+                enabled: true,
+                message_type: 1074,
+                description: 'GPS MSM4',
+                com_port: 'COM1',
+                rate: 1
+            });
+            config.message_count = config.messages.length;
+            renderMessages();
+        }
+
+        $(document).ready(function() {
+            $('#saveBtn').click(saveConfiguration);
+            $('#reloadBtn').click(loadConfiguration);
+            $('#detectBtn').click(detectFromGPS);
+            $('#resetBtn').click(resetToDefault);
+            $('#addMessageBtn').click(addMessage);
+
+            loadConfiguration();
+        });
+    </script>
+</body>
+</html>

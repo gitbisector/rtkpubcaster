@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 RTKPubcaster - Streaming Status</title>
+    <script src="jquery-3.4.1.min.js"></script>
+    <script src="bs-4.3.1.bundle.min.js"></script>
+    <link rel="stylesheet" href="bs-4.3.1.min.css">
+    <link rel="shortcut icon" href="/favicon.ico" type="image/x-icon">
+    <style>
+        .status-indicator {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 10px;
+        }
+        .status-connected { background-color: #28a745; }
+        .status-connecting { background-color: #ffc107; }
+        .status-disconnected { background-color: #dc3545; }
+        .status-error { background-color: #dc3545; }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #007bff;
+        }
+
+        .stat-label {
+            font-size: 0.875rem;
+            color: #6c757d;
+            text-transform: uppercase;
+        }
+
+        nav.navbar {
+            margin-bottom: 20px;
+        }
+
+        .refresh-btn {
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container">
+            <a class="navbar-brand" href="/">ESP32 NTRIP</a>
+            <div class="navbar-nav">
+                <a class="nav-item nav-link" href="/">GPS Dashboard</a>
+                <a class="nav-item nav-link" href="/config.html">Configuration</a>
+                <a class="nav-item nav-link active" href="/ably.html">Ably Status</a>
+                <a class="nav-item nav-link" href="/rtcm.html">RTCM Config</a>
+                <a class="nav-item nav-link" href="/ota.html">Firmware Update</a>
+                <a class="nav-item nav-link" href="/log.html">Logs</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container">
+        <h2>RTKPubcaster Streaming Status</h2>
+
+        <button class="btn btn-primary refresh-btn" onclick="loadAblyStatus()">Refresh Status</button>
+
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">Connection Status</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="mb-3">
+                            <div class="stat-label">State</div>
+                            <div>
+                                <span class="status-indicator" id="status-indicator"></span>
+                                <span class="stat-value" id="state">Loading...</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="mb-3">
+                            <div class="stat-label">Channel</div>
+                            <div class="stat-value" id="channel">-</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mt-3">
+            <div class="card-header">
+                <h5 class="mb-0">Statistics</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-3">
+                        <div class="mb-3">
+                            <div class="stat-label">Messages Sent</div>
+                            <div class="stat-value" id="messages_sent">0</div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="mb-3">
+                            <div class="stat-label">Bytes Sent</div>
+                            <div class="stat-value" id="bytes_sent">0</div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="mb-3">
+                            <div class="stat-label">Avg Latency</div>
+                            <div class="stat-value"><span id="avg_latency_ms">0</span> ms</div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="mb-3">
+                            <div class="stat-label">Current Batch</div>
+                            <div class="stat-value"><span id="current_batch_count">0</span> msgs</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mt-3">
+            <div class="card-header">
+                <h5 class="mb-0">Client Information</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-4">
+                        <div class="mb-3">
+                            <div class="stat-label">Subscribers</div>
+                            <div class="stat-value" id="subscriber_count">0</div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="mb-3">
+                            <div class="stat-label">GPS Data Available</div>
+                            <div class="stat-value" id="receiving_gps_data">No</div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="mb-3">
+                            <div class="stat-label">Publishing Active</div>
+                            <div class="stat-value" id="actively_publishing">No</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="alert alert-info" role="alert" id="client_note">
+                    <strong>Status:</strong> <span id="client_note_text">Loading...</span>
+                </div>
+                <div class="mt-2">
+                    <a href="https://ably.com/dashboard" target="_blank" class="btn btn-sm btn-outline-primary">
+                        View Ably Dashboard
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mt-3">
+            <div class="card-header">
+                <h5 class="mb-0">About RTKPubcaster Streaming</h5>
+            </div>
+            <div class="card-body">
+                <p>This ESP32 device is streaming RTK correction data to mobile clients via the Ably realtime platform.</p>
+                <ul>
+                    <li><strong>Protocol:</strong> MQTT over TLS (port 8883)</li>
+                    <li><strong>Message Format:</strong> JSON envelope with base64-encoded RTCM3 binary data</li>
+                    <li><strong>Batching:</strong> RTCM3 messages are batched every 200ms for efficiency</li>
+                    <li><strong>QoS:</strong> Level 1 (at least once delivery) for reliable transmission</li>
+                    <li><strong>Conditional Publishing:</strong> Only publishes when subscribers are present to save bandwidth</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function loadAblyStatus() {
+            $.ajax({
+                url: '/api/ably/status',
+                method: 'GET',
+                success: function(data) {
+                    $('#state').text(data.state.charAt(0).toUpperCase() + data.state.slice(1));
+                    $('#channel').text(data.channel);
+
+                    // Update status indicator
+                    $('#status-indicator').removeClass('status-connected status-connecting status-disconnected status-error');
+                    $('#status-indicator').addClass('status-' + data.state);
+
+                    // Update statistics
+                    $('#messages_sent').text(data.stats.messages_sent.toLocaleString());
+                    $('#bytes_sent').text(formatBytes(data.stats.bytes_sent));
+                    $('#avg_latency_ms').text(data.stats.avg_latency_ms);
+                    $('#current_batch_count').text(data.stats.current_batch_count);
+
+                    // Update client information
+                    if (data.clients) {
+                        $('#subscriber_count').text(data.clients.subscriber_count);
+                        $('#receiving_gps_data').text(data.clients.receiving_gps_data ? 'Yes' : 'No');
+                        $('#actively_publishing').text(data.clients.actively_publishing ? 'Yes' : 'No');
+                        $('#client_note_text').text(data.clients.note || 'No status information available');
+                    }
+                },
+                error: function(xhr, status, error) {
+                    $('#state').text('Error');
+                    $('#status-indicator').removeClass().addClass('status-indicator status-error');
+                    console.error('Failed to load Ably status:', error);
+                }
+            });
+        }
+
+        function formatBytes(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+            return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+        }
+
+        // Load status on page load
+        $(document).ready(function() {
+            loadAblyStatus();
+            // Auto-refresh every 5 seconds
+            setInterval(loadAblyStatus, 5000);
+        });
+    </script>
+</body>
+</html>

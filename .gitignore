@@ -1,2 +1,29 @@
 /build
 /.vscode
+
+# Auto-generated configuration
+sdkconfig
+sdkconfig.old
+
+# Security keys and credentials (NEVER commit these!)
+secure_boot_signing_key.pem
+secure_boot_public_key.pem
+*.key
+*.pem
+main/ably_credentials.h
+
+# Build artifacts
+*.bin
+*.elf
+*.map
+
+# Editor files
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python
+tools/venv/
+*.pyc
+__pycache__/
